@@ -1,0 +1,284 @@
+---
+title: "Inflation Dynamics Time Series Project"
+author: "Group 3: Peyton Ramsey & Kundai Mutukura"
+format:
+  html:
+    embed-resources: true
+    self-contained-math: true
+execute:
+  echo: true
+  warning: false
+  fig-width: 8
+  fig-height: 5
+---
+
+# Introduction
+
+The Vector Error Correction Model (VECM) is a multivariate time series method that extends the Vector Autoregression (VAR) framework to handle cointegrated I(1) series. While VAR models differences of non-stationary series and discards long-run information, VECM explicitly incorporates the long-run equilibrium relationships among variables through an error correction term (ECT). When series are cointegrated, the ECT measures how far the system has deviated from its long-run path and drives gradual mean reversion back toward equilibrium. This makes VECM well-suited for macroeconomic applications where variables share a common stochastic trend.
+
+This project applies VECM to four monthly macroeconomic variables sourced from the Federal Reserve Economic Data (FRED) database. The Consumer Price Index (CPI) is the inflation outcome variable. Advance Retail Sales serves as a demand shock proxy, capturing consumer spending and demand-pull pressure on prices. The Industrial Production Index serves as a supply shock proxy, representing the productive capacity of the economy. The Unemployment Rate serves as a labor market shock proxy, capturing slack or tightness in the labor market and its wage-price dynamics. The data span January 1992 through October 2024, yielding 407 monthly observations.
+
+Our research question is: **How do demand, supply, and labor market shocks dynamically affect U.S. inflation over time?**
+
+VECM is the appropriate model for this dataset for two reasons. First, Augmented Dickey-Fuller (ADF) tests confirm that all four series are integrated of order one, I(1), meaning they are non-stationary in levels but stationary after first differencing. Second, the Johansen test identifies three cointegrating relationships among the variables, meaning the series share long-run equilibrium paths and a VAR on first differences alone would discard meaningful information. Together, these findings satisfy the two necessary conditions for VECM estimation.
+
+# Method
+
+## Vector Error Correction Model
+
+The VECM for a $p$-variable system with $k-1$ lags of differences is written as:
+
+$$\Delta Y_t = \alpha \beta' Y_{t-1} + \sum_{i=1}^{k-1} \Gamma_i \Delta Y_{t-i} + \varepsilon_t$$
+
+where:
+
+- $Y_t$ is a $p \times 1$ vector of I(1) variables at time $t$
+- $\Delta Y_t = Y_t - Y_{t-1}$ is the vector of first differences
+- $\beta$ is the $p \times r$ matrix of cointegrating vectors, the long-run equilibrium relationships. While $\beta' Y_{t-1}$ are the error correction terms (ECTs)
+- $\alpha$ is the $p \times r$ matrix of loading (adjustment) coefficients, how quickly each variable corrects back toward equilibrium after a deviation
+- $\Gamma_i$ are $p \times p$ matrices of short-run dynamic coefficients, capturing transitory effects of lagged changes
+- $\varepsilon_t$ is a $p \times 1$ vector of white noise errors
+- $r$ is the cointegrating rank, determined by the Johansen trace test
+
+The cointegrating rank $r$ is tested using the Johansen trace statistic. The null hypothesis for each rank $r_0$ is that there are at most $r_0$ cointegrating relationships. Starting from $r_0 = 0$ and increasing, we reject until the test statistic falls below the critical value. The first $r_0$ we fail to reject is our rank estimate.
+
+## Toy Example
+
+To illustrate the mechanics of VECM, we simulate two cointegrated I(1) series with a known long-run relationship ($y = x + \text{noise}$) and estimate the model.
+
+```{r}
+#| output: false
+library(dplyr)
+library(lubridate)
+library(vars)
+library(tseries)
+library(ggplot2)
+library(tidyr)
+library(urca)
+```
+
+```{r}
+set.seed(42)
+n <- 200
+
+# simulate two cointegrated i(1) series, x is a random walk, y tracks x with noise
+x <- cumsum(rnorm(n, sd = 1))
+y <- x + rnorm(n, sd = 0.5)
+
+toy_df <- data.frame(x = x, y = y)
+
+# plot series
+matplot(toy_df, type = "l", lty = 1, col = c("black", "blue"),
+        main = "Simulated Cointegrated Series", ylab = "Value", xlab = "Time")
+legend("topright", legend = c("x", "y"), col = c("black", "blue"), lty = 1)
+```
+
+```{r}
+# johansen trace test on toy data, expect r = 1
+toy_jo <- ca.jo(toy_df, type = "trace", ecdet = "const", K = 2)
+summary(toy_jo)
+```
+
+```{r}
+# estimate vecm with r = 1 cointegrating relationship
+toy_vecm <- cajorls(toy_jo, r = 1)
+summary(toy_vecm$rlm)
+```
+
+The ECT coefficient in the `y.d` equation should be negative and significant, confirming that when $y$ deviates above its long-run relationship with $x$, it corrects downward. The `x.d` equation's ECT should be near zero or positive, since $x$ is the "driver" series and does not adjust. This mirrors the structure we observe in the inflation application below.
+
+# Application
+
+## Data prep
+
+```{r}
+df <- read.csv("C:/Users/ramse/msba-courses/ds 809/project/PROJECT DATA.csv")
+
+# Check column names + first rows
+names(df)
+head(df, 3)
+str(df)
+nrow(df)
+```
+
+```{r}
+# mutate observation_date column to proper date format
+df <- df %>% 
+    mutate(observation_date = ymd(observation_date)) %>%
+    rename(Date = observation_date, # rename to date
+           cpi = CPIAUCSL,
+           ind_pro = INDPRO,
+           retail_sales = RSXFS,
+           unemp_rate = UNRATE) %>%
+    drop_na() 
+str(df) # checking that date conversion worked
+```
+
+## EDA 
+
+```{r}
+# simple plots to observe any stationarity
+ggplot(df, aes(x = Date, y = cpi)) +
+  geom_line() +
+  labs(title = "Consumer Price Index", x = "Date", y = "CPI (Index)")
+
+ggplot(df, aes(x = Date, y = ind_pro)) +
+  geom_line() +
+  labs(title = "Industrial Production Index", x = "Date", y = "Index")
+
+ggplot(df, aes(x = Date, y = retail_sales)) +
+  geom_line() +
+  labs(title = "Advance Retail Sales", x = "Date", y = "Millions of Dollars")
+
+ggplot(df, aes(x = Date, y = unemp_rate)) +
+  geom_line() +
+  labs(title = "Unemployment Rate", x = "Date", y = "Unemployment Rate (%)")
+```
+
+**Interpretation:** These plots are showing early signs of non-stationarity due to variance in mean and linearity in each plot. 
+
+## ADF Testing
+
+Testing for stationarity in our plots, will help us determine which model is best to use (VAR or VECM). If it's stationary, it'd be best to use VAR, otherwise if there is non-stationarity we will use run a Johansen test, if r = 0, there's no cointegration and we can use VAR, if r >= 1, there is cointegration and we will use VECM. 
+
+```{r}
+set.seed(123)
+
+# selecting only columns to test excluding date (that's why there is a -1)
+ts_df <- df[, -1]
+
+# apply adf.test() function, 2 is saying to apply function to all columns
+adf_results <- apply(ts_df, 2, adf.test)
+
+# to view results, create a loop to view each p-value for each column
+for (i in names(adf_results)) {
+    cat("Results for", i, ":\n")
+    print(adf_results[[i]]$p.value)
+    cat("\n")
+}
+```
+
+**Interpretation:** All of the p-values have a value greater than 0.05, as a result, we fail to reject the null hypothesis. All four of the series are non-stationary in levels. 
+
+```{r}
+# differencing the series, then re-running adf.test() 
+set.seed(123)
+ts_df_diff <- df[, -1]
+
+adf_test_diff <- function(x) {
+  differenced_x <- diff(x, differences = 1)
+  test_result <- adf.test(differenced_x, alternative = "stationary")
+  return(test_result$p.value)
+}
+
+adf_results_diff <- apply(ts_df_diff, 2, adf_test_diff)
+
+for (i in names(adf_results_diff)) {
+    cat("Results for", i, ":\n")
+    print(adf_results_diff[[i]])
+    cat("\n")
+}
+```
+
+**Interpretation:** After one difference, all four of the p-values are < 0.05, this proves that they are I(1) or stationary after one difference. Next, we will perform a Johansen test.
+
+## Johansen Test
+
+```{r}
+# finding BIC-selected lag from VARselect to set K in ca.jo()
+lag_sel <- VARselect(df[, -1], lag.max = 8, type = "const")
+lag_sel$selection  # look at SC(n), that's the BIC value
+k_bic <- as.integer(lag_sel$selection["SC(n)"])
+cat("BIC-selected lag order (SC/BIC):", k_bic, "\n")
+
+johansen_test <- ca.jo(ts_df, type = "trace", ecdet = "const", K = k_bic)
+summary(johansen_test)
+```
+
+**Interpretation:** Reading the trace test, starting from the bottom at r = 0, then going upwards to r <= 3, we strongly reject the null hypothesis for r = 0 because 145.97 > 60.16. We again strongly reject the null hypothesis for r <= 1 because 53.41 > 41.07. We reject at all significance levels for r <= 2 because 25.14 exceeds the 10%, 5%, and 1% critical values (17.85, 19.96, and 24.60 respectively), though only marginally at 1%. For r <= 3, we fail to reject because 7.03 is smaller than all critical values (7.52, 9.24, and 12.97 for 10%, 5%, and 1% respectively). This is saying, there are 3 cointegrating relationships, confirming the assumption to use VECM based on the non-stationary findings above. 
+
+## Estimate VECM
+
+```{r}
+vecm_res <- cajorls(johansen_test, r = 3)
+summary(vecm_res$rlm) # call summary on $rlm component directly bc summary() doesn't have a method for cajorls objects
+```
+
+**Interpretation:** Focusing on the cpi.d equation, an R-squared of 0.587 explains ~58% of month-to-month CPI changes. The ect1 of -0.03*** is the key error correction result, when CPI is above its long-run equilibrium, it corrects downward at ~3% per month. A cpi.dl1 of 0.317*** confirms strong inflation momentum, past CPI predicts future CPI. For the shock variables, the demand shock (retail_sales.dl1 = 2.18e-05***) is highly significant in the short run, confirming that demand-pull pressure from consumer spending drives near-term inflation. The supply shock (ind_pro.dl1) is insignificant in the CPI equation, suggesting industrial production does not directly transmit to inflation in the short run. The labor market shock (unemp_rate.dl1) is insignificant in the CPI equation but significant in the ind_pro.d and unemp_rate.d equations, indicating that labor market shocks primarily spread through production and employment channels rather than directly into prices in the short run.
+
+## Cointegrating Vectors
+
+```{r}
+# cointegrating vectors (beta matrix) normalized to identity in first r rows
+# rows: cpi, ind_pro, retail_sales, unemp_rate, constant; columns: ect1, ect2, ect3
+round(johansen_test@V[, 1:3], 4)
+```
+
+**Interpretation:** Each column is a long-run equilibrium relationship among the four variables (plus the constant). The three cointegrating vectors define the linear combinations of cpi, ind_pro, retail_sales, and unemp_rate that are stationary. These are the $\beta$ vectors that appear in the ECT $\beta' Y_{t-1}$, with the corresponding $\alpha$ loadings (ect1, ect2, ect3 in the equation output) determining how strongly and in what direction each variable adjusts back toward each equilibrium.
+
+## Diagnostic tests
+
+```{r}
+# convert vecm to var for diagnostic testing
+vecm_var <- vec2var(johansen_test, r = 3)
+
+# test for serial correlation
+serial.test(vecm_var, lags.pt = 10, type = "PT.asymptotic")
+
+# test for heteroscedasticity (arch effect)
+arch.test(vecm_var, lags.multi = 10)
+
+# test for normality
+normality.test(vecm_var)
+```
+
+**Interpretation:** All three violations are expected given based on the sample extremes, 2021 to 2025 has COVID and Post-COVID repercussions, as well as a short sample size. The VECM and cointegration findings are still valid and interpretable, this is just a limitation of the data available.
+
+## Model Stability
+
+```{r}
+# characteristic root moduli of the companion var representation
+# for vecm with r=3 and k=4: expect 3 roots = 1 (unit roots) and 1 root < 1 (stable)
+roots(vecm_var)
+```
+
+**Interpretation:** A VECM with r = 3 cointegrating relationships and k = 4 variables should have exactly r = 3 unit roots (moduli = 1) and k - r = 1 root strictly inside the unit circle (modulus < 1). All remaining moduli below 1 confirm that the estimated VECM is dynamically stable and that the impulse response functions and variance decompositions are well-defined.
+
+## Impulse Response Functions
+
+```{r}
+# compute IRFs for all variables with bootstrapped confidence bands
+irfs <- irf(vecm_var, response = "cpi", n.ahead = 20, ortho = TRUE, boot = TRUE, runs = 100)
+
+plot(irfs)
+```
+
+**Interpretation:** A CPI own-shock causes a positive response that peaks around period 3, then gradually declines but remains positive throughout, confirming strong inflation momentum. A supply shock (ind_pro) starts near zero and trends negative, consistent with its short-run insignificance in the VECM, supply capacity expansions do not directly raise inflation. A demand shock (retail_sales) starts near zero and rises linearly. This is the strongest result, directly answering the research question, demand-side shocks have a growing, sustained positive effect on inflation over time. A labor market shock (unemp_rate) starts near zero and rises steadily over the horizon, a somewhat counterintuitive result given its short-run insignificance, suggesting that labor market tightness builds inflationary pressure gradually through wage dynamics rather than immediately. The key finding is that demand and labor market shocks both exert persistent long-run positive effects on inflation, while supply shocks have a dampening effect. 
+
+## Forecast Error Variance Decomposition
+
+```{r}
+#| fig-width: 12
+#| fig-height: 8
+# compute fevd for a specified number of steps ahead
+fevd_results <- fevd(vecm_var, n.ahead = 20)
+round(fevd_results$cpi * 100, 2)
+plot(fevd_results, names = "cpi")
+```
+
+**Interpretation:** At short horizons, CPI forecast variance is almost entirely driven by its own shocks, confirming strong inflation inertia. Over longer horizons, own-shock variance declines and the contributions of external shocks grow, directly answering how each shock type matters over time. By horizon 20, the demand shock (retail_sales) accounts for 35.5% of CPI forecast variance, making it the dominant external driver. The labor market shock (unemp_rate) accounts for 20.5%, reinforcing the IRF finding that labor market conditions build inflationary pressure over time. The supply shock (ind_pro) accounts for only 5.6%, consistent with its short-run insignificance. This decomposition confirms that demand shocks are the primary external driver of U.S. inflation dynamics, with labor market shocks playing a secondary but meaningful long-run role.
+
+# Conclusion
+
+## Strengths
+
+VECM performed well given the structure of the data. The Johansen trace test cleanly identified three cointegrating relationships, confirming that the series share long-run equilibrium paths rather than diverging independently. The error correction term in the CPI equation is statistically significant at the 1% level (ect1 = -0.03), confirming that when CPI deviates above its long-run equilibrium, it gradually corrects downward at roughly 3% per month. The VECM framework also provides rich interpretive tools like impulse response functions and forecast error variance decomposition, that clearly quantify how shocks to each variable propagate through the system over time. The FEVD reveals that by horizon 20, retail sales accounts for 35.5% of CPI forecast variance, a finding that a simple univariate ARIMA model would be entirely unable to surface.
+
+## Weaknesses
+
+The primary limitation is that all three diagnostic tests, serial correlation (Portmanteau), heteroscedasticity (ARCH), and normality (JB) all reject their null hypotheses strongly. These violations are largely due to structural breaks introduced by the COVID-19 pandemic and its aftermath (2020–2022), which produced extreme observations in every series. The impulse responses and variance decompositions are still interpretable as long-run estimates, but the confidence bands should be treated with caution. A more robust extension would incorporate a structural break dummy variable for 2020–2022 or restrict the sample to the post-2010 period to reduce the influence of crisis-era outliers.
+
+## Insights
+
+Three substantive economic insights emerged from this analysis. First, CPI has strong short-run momentum, a one-standard-deviation shock to CPI itself produces a persistent positive response that peaks around period 3 and remains elevated through period 20. Second, retail sales is the dominant long-run driver of inflation, its FEVD share grows steadily from near zero at short horizons to 35.5% at horizon 20, and its IRF shows the largest and most persistent positive effect on CPI. This aligns with demand-pull inflation theory, sustained consumer spending exerts upward pressure on prices over time. Third, unemployment has a surprising long-run positive effect on CPI despite being insignificant in the short-run VECM coefficient, suggesting its influence on inflation operates primarily through long-run equilibrium adjustment rather than contemporaneous dynamics.
+
