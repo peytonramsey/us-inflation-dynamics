@@ -1,0 +1,208 @@
+---
+title: "Inflation Dynamics Time Series Project"
+author: "Group 3: Peyton Ramsey & Kundai Mutukura"
+format: html
+execute:
+  warning: false
+---
+
+# Data prep 
+
+```{r}
+#| output: false
+library(dplyr)
+library(lubridate)
+library(vars)
+library(tseries)
+library(ggplot2)
+library(tidyr)
+library(urca)
+```
+
+```{r}
+df <- read.csv("C:/Users/ramse/msba-courses/ds 809/project/PROJECT DATA.csv")
+
+# Check column names + first rows
+names(df)
+head(df, 3)
+str(df)
+nrow(df)
+```
+
+```{r}
+# mutate observation_date column to proper date format
+df <- df %>% 
+    mutate(observation_date = ymd(observation_date)) %>%
+    rename(Date = observation_date, # rename to date
+           cpi = CPIAUCSL,
+           ind_pro = INDPRO,
+           retail_sales = RSXFS,
+           unemp_rate = UNRATE) %>%
+    drop_na() 
+str(df) # checking that date conversion worked
+head(df, 3)
+```
+
+# EDA 
+
+```{r}
+# simple plots to observe any stationarity
+ggplot(df, aes(x = Date, y = cpi)) +
+  geom_line() +
+  labs(title = "Consumer Price Index", x = "Date", y = "CPI (Index)")
+
+ggplot(df, aes(x = Date, y = ind_pro)) +
+  geom_line() +
+  labs(title = "Industrial Production Index", x = "Date", y = "Index")
+
+ggplot(df, aes(x = Date, y = retail_sales)) +
+  geom_line() +
+  labs(title = "Advance Retail Sales", x = "Date", y = "Millions of Dollars")
+
+ggplot(df, aes(x = Date, y = unemp_rate)) +
+  geom_line() +
+  labs(title = "Unemployment Rate", x = "Date", y = "Unemployment Rate (%)")
+```
+
+**Interpretation:** These plots are showing early signs of non-stationarity due to variance in mean and linearity in each plot. 
+
+# ADF Testing
+
+Testing for stationarity in our plots, will help us determine which model is best to use (VAR or VECM). If it's stationary, it'd be best to use VAR, otherwise if there is non-stationarity we will use run a Johansen test, if r = 0, there's no cointegration and we can use VAR, if r >= 1, there is cointegration and we will use VECM. 
+
+```{r}
+set.seed(123)
+
+# selecting only columns to test excluding date (that's why there is a -1)
+ts_df <- df[, -1]
+
+# apply adf.test() function, 2 is saying to apply function to all columns
+adf_results <- apply(ts_df, 2, adf.test)
+
+# to view results, create a loop to view each p-value for each column
+for (i in names(adf_results)) {
+    cat("Results for", i, ":\n")
+    print(adf_results[[i]]$p.value)
+    cat("\n")
+}
+```
+
+**Interpretation:** All of the p-values have a value greater than 0.05, as a result, we fail to reject the null hypothesis. All four of the series are non-stationary in levels. 
+
+```{r}
+# differencing the series, then re-running adf.test() 
+set.seed(123)
+ts_df_diff <- df[, -1]
+
+adf_test_diff <- function(x) {
+  differenced_x <- diff(x, differences = 1)
+  test_result <- adf.test(differenced_x, alternative = "stationary")
+  return(test_result$p.value)
+}
+
+adf_results_diff <- apply(ts_df_diff, 2, adf_test_diff)
+
+for (i in names(adf_results_diff)) {
+    cat("Results for", i, ":\n")
+    print(adf_results_diff[[i]])
+    cat("\n")
+}
+```
+
+**Interpretation:** After one difference, all four of the p-values are < 0.05, this proves that they are I(1) or stationary after one difference. Next, we will perform a Johansen test.
+
+# Johansen Test
+
+```{r}
+# finding BIC-selected lag from VARselect to set K in ca.jo()
+lag_sel <- VARselect(df[, -1], lag.max = 8, type = "const")
+lag_sel$selection  # look at SC(n), that's the BIC value
+k_bic <- as.integer(lag_sel$selection["SC(n)"])
+k_bic
+
+johansen_test <- ca.jo(ts_df, type = "trace", ecdet = "const", K = k_bic)
+summary(johansen_test)
+```
+
+**Interpretation:** Reading the trace test, starting from the bottom at r = 0, then going upwards to r <= 3, we strongly reject the null hypothesis for r = 0 because 145.97 > 60.16. We again strongly reject the null hypothesis for r <= 1 because 53.41 > 41.07. We reject at all significance levels for r <= 2 because 25.14 exceeds the 10%, 5%, and 1% critical values (17.85, 19.96, and 24.60 respectively), though only marginally at 1%. For r <= 3, we fail to reject because 7.03 is smaller than all critical values (7.52, 9.24, and 12.97 for 10%, 5%, and 1% respectively). This is saying, there are 3 cointegrating relationships, confirming the assumption to use VECM based on the non-stationary findings above. 
+
+# Estimate VECM
+
+```{r}
+vecm_res <- cajorls(johansen_test, r = 3)
+summary(vecm_res$rlm) # call summary on $rlm component directly bc summary() doesn't have a method for cajorls objects
+```
+
+**Interpretation:** Our primary focus is focusing on the cpi.d output because our goal is to forecast inflation. An R-squared of 0.587 explains ~58% of month-to-month CPI changes, which is strong. An ect1 of -0.03*** is very important to look at, when CPI is above its long-run equilibrium, it corrects downward at ~3% per month, this is the error correction in the VECM working as expected. A cpi.dl1 = to 0.317*** indicates strong momentum, that past inflation predicts future inflation. A retail_sales.dl1 of 2.18e-05*** indicates that retail sales significantly predict inflation in the short run, in which retail sales growth predicts inflation (more spending, higher the prices). However, ind_pro.dl1 shows no significance in predicting CPI in the short run, though unemp_rate.dl1 is significant in the ind_pro.d and unemp_rate.d equations, suggesting unemployment and industrial production are more closely linked to each other than to inflation directly. 
+
+# Diagnostic tests
+
+```{r}
+# convert vecm to var for diagnostic testing
+vecm_var <- vec2var(johansen_test, r = 3)
+
+# test for serial correlation
+serial.test(vecm_var, lags.pt = 10, type = "PT.asymptotic")
+
+# test for heteroscedasticity (arch effect)
+arch.test(vecm_var, lags.multi = 10)
+
+# test for normality
+normality.test(vecm_var)
+```
+
+**Interpretation:** All three violations are expected given based on the sample extremes, 2021 to 2025 has COVID and Post-COVID repercussions, as well as a short sample size. The VECM and cointegration findings are still valid and interpretable, this is just a limitation of the data available. 
+
+# Impulse Response Functions
+
+```{r}
+# compute IRFs for all variables with bootstrapped confidence bands
+irfs <- irf(vecm_var, response = "cpi", n.ahead = 20, ortho = TRUE, boot = TRUE, runs = 100)
+
+plot(irfs)
+```
+
+**Interpretation:** A shock to CPI itself causes a positive response that peaks around period 3, then gradually declines but stays positive throughout, confirming strong inflation momentum. From ind_pro, it starts near zero, then trends negative, confirming the non-significance of ind_pro. In the retail_sales plot, starts near zero and rises linearly, this is the strongest and most significant result, a shock to retail sales has a persistent, growing positive effect on inflation. In the unemp_rate plot, it starts near zero, and rises steadily, this is surprising because unemp_rate.dl1 was insignificant in the CPI equation. The key takeaway is that retail sales and unemployment shocks have persistent long-run positive effects on inflation. 
+
+# Forecast Error Variance Decomposition
+
+```{r}
+#| fig-width: 12
+#| fig-height: 8
+# compute fevd for a specified number of steps ahead
+fevd_results <- fevd(vecm_var, n.ahead = 20)
+round(fevd_results$cpi * 100, 2)
+plot(fevd_results, names = "cpi")
+```
+
+**Interpretation:** At short horizons, CPI forecast variance is mostly driven by its own shocks, showing strong inflation momentum. Over longer horizons, CPI's own-shock declines, by horizon 20, retail sales (retail_sales) becomes the dominant driver, then unemployment (unemp_rate), ind_pro has minimal influence. These findings are in line with the significance found in the VECM equation.
+
+# Forecast future inflation values
+
+```{r}
+forecast_results <- predict(vecm_var, n.ahead = 12, ci = 0.95)
+# extract cpi forecast and build date-indexed data frame
+last_date <- tail(df$Date, 1)
+forecast_dates <- seq(last_date %m+% months(1), by = "month", length.out = 12)
+
+forecast_df <- data.frame(
+  Date  = forecast_dates,
+  fcst  = forecast_results$fcst$cpi[, "fcst"],
+  lower = forecast_results$fcst$cpi[, "lower"],
+  upper = forecast_results$fcst$cpi[, "upper"]
+)
+
+# last 24 months of actuals for context
+actual_tail <- tail(df[, c("Date", "cpi")], 24)
+
+ggplot() +
+  geom_line(data = actual_tail, aes(x = Date, y = cpi)) +
+  geom_ribbon(data = forecast_df, aes(x = Date, ymin = lower, ymax = upper),
+              alpha = 0.2, fill = "blue") +
+  geom_line(data = forecast_df, aes(x = Date, y = fcst),
+            color = "blue", linetype = "dashed") +
+  labs(title = "12-Month CPI Forecast", x = "Date", y = "CPI (Index)")
+```
+
+# Conclusion
+
