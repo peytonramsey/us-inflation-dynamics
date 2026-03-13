@@ -1,6 +1,6 @@
 ---
 title: "Inflation Dynamics Time Series Project"
-author: "Group 3: Peyton Ramsey & Kundai Mutukura"
+author: "Peyton Ramsey"
 format:
   html:
     embed-resources: true
@@ -233,16 +233,6 @@ normality.test(vecm_var)
 ```
 
 **Interpretation:** All three violations are expected given based on the sample extremes, 2021 to 2025 has COVID and Post-COVID repercussions, as well as a short sample size. The VECM and cointegration findings are still valid and interpretable, this is just a limitation of the data available.
-
-## Model Stability
-
-```{r}
-# characteristic root moduli of the companion var representation
-# for vecm with r=3 and k=4: expect 3 roots = 1 (unit roots) and 1 root < 1 (stable)
-roots(vecm_var)
-```
-
-**Interpretation:** A VECM with r = 3 cointegrating relationships and k = 4 variables should have exactly r = 3 unit roots (moduli = 1) and k - r = 1 root strictly inside the unit circle (modulus < 1). All remaining moduli below 1 confirm that the estimated VECM is dynamically stable and that the impulse response functions and variance decompositions are well-defined.
 
 ## Impulse Response Functions
 
